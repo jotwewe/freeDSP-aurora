@@ -57,7 +57,9 @@ struct tSettings
   int addonid;
   bool vpot;
   String pwdap;
+  String apname;
   int adcsum;
+  bool wifiOn;
 };
 
 tSettings Settings;
@@ -203,6 +205,8 @@ String presetUsrparamFile[MAX_NUM_PRESETS] = { "/usrparam.001", "/usrparam.002",
 String presetAddonCfgFile[MAX_NUM_PRESETS] = { "/addoncfg.001", "/addoncfg.002", "/addoncfg.003", "/addoncfg.004" };
 
 AsyncWebServer server( 80 );
+
+bool changeWifiState = false;
 
 //------------------------------------------------------------------------------
 //
@@ -403,16 +407,18 @@ void initUserParams( void )
  */
 void readSettings( void )
 {
+  Settings.ssid = "";
+  Settings.password = "";
+  Settings.addonid = ADDON_CUSTOM;
+  Settings.vpot = false;
+  Settings.pwdap = "";
+  Settings.apname = "AP-freeDSP-aurora";
+  Settings.adcsum = 0;
+  Settings.wifiOn = true;
+
   if( !SPIFFS.exists( "/settings.ini" ) )
   {
-    Serial.print( "Writing default settings.ini..." );
-
-    Settings.ssid = "";
-    Settings.password = "";
-    Settings.addonid = ADDON_CUSTOM;
-    Settings.vpot = false;
-    Settings.pwdap = "";
-    Settings.adcsum = 0;
+    Serial.print( "Writing default settings.ini..." );  
     writeSettings();
 
     Serial.println( "[OK]" );
@@ -436,16 +442,10 @@ void readSettings( void )
     fileSettings.close();
 
     JsonObject jsonSettings = jsonDoc.as<JsonObject>();
-
+    
     if( jsonSettings["version"].as<String>().startsWith( "1." ) )
     {
-      Serial.println( "Updateing from 1.x.x" );
-      Settings.ssid = "";
-      Settings.password = "";
-      Settings.addonid = ADDON_CUSTOM;
-      Settings.vpot = false;
-      Settings.pwdap = "";
-      Settings.adcsum = 0;
+      Serial.println( "Updating from 1.x.x" );
       writeSettings();
     }
 
@@ -457,11 +457,18 @@ void readSettings( void )
     else
       Settings.vpot = false;
     Settings.pwdap = jsonSettings["pwdap"].as<String>();
+    if( !jsonSettings["apname"].isNull() )
+      Settings.apname = jsonSettings["apname"].as<String>();
     Settings.adcsum = jsonSettings["adcsum"].as<String>().toInt();
-
+    // When updating from earlier version jsonSettings["wifion"] could return "null".
+    // Then it should use the default value
+    if( jsonSettings["wifion"].as<String>() == "true" )
+      Settings.wifiOn = true;
+    else if( jsonSettings["wifion"].as<String>() == "false" )
+      Settings.wifiOn = false;
+    
     Serial.println( "[OK]" );
-    Serial.println( "Device config" );
-    //Serial.print( "PID: " ); Serial.println( Settings.pid );
+    Serial.println( "Device config" );    
     Serial.print( "AID: " ); Serial.println( Settings.addonid );
     Serial.print( "Volume Poti: " ); Serial.println( Settings.vpot ); 
     Serial.print( "ADC Channel Sum: " );Serial.println( Settings.adcsum );
@@ -469,9 +476,6 @@ void readSettings( void )
   }
   else
     Serial.println( "[ERROR] readSettings(): Opening settings.ini failed." );
-
-  
-
 }
 
 //==============================================================================
@@ -489,7 +493,9 @@ void writeSettings( void )
     jsonSettings["aid"] = Settings.addonid;
     jsonSettings["vpot"] = Settings.vpot;
     jsonSettings["pwdap"] = Settings.pwdap;
+    jsonSettings["apname"] = Settings.apname;
     jsonSettings["adcsum"] = Settings.adcsum;
+    jsonSettings["wifion"] = Settings.wifiOn;
 
     if( serializeJson( jsonSettings, fileSettings ) == 0 )
       Serial.println( "[ERROR] writeSettings(): Failed to write settings to file" );
@@ -3667,23 +3673,27 @@ void myWiFiTask(void *pvParameters)
   bool firstConnectAttempt = true;
   bool myWiFiFirstConnect = true;
   int cntrAuthFailure = 0;
+  IPAddress ip(192, 168, 5, 1);
+  IPAddress subnet(255, 255, 255, 0);
 
   WiFi.mode(WIFI_AP_STA);
   WiFi.setHostname( "freeDSP-aurora" );
   // Start access point
   if( Settings.pwdap.length() > 0 )
   {
-    Serial.println( "AP password protected" );
-    WiFi.softAP( "AP-freeDSP-aurora", Settings.pwdap.c_str() );
+    Serial.print( "AP password protected " );
+    Serial.println( Settings.apname );
+    WiFi.softAP( Settings.apname.c_str(), Settings.pwdap.c_str() );
   }
   else
   {
-    Serial.println( "AP open" );
-    WiFi.softAP( "AP-freeDSP-aurora" );
+    Serial.print( "AP open: " );
+    Serial.println( Settings.apname );
+    WiFi.softAP( Settings.apname.c_str() );
   }
   delay(100);
 
-  if( !WiFi.softAPConfig( IPAddress(192, 168, 5, 1), IPAddress(192, 168, 5, 1), IPAddress(255, 255, 255, 0) ) )
+  if( !WiFi.softAPConfig( ip, ip, subnet ) )
     Serial.println("AP Config Failed");
   
   // Start server
@@ -3695,7 +3705,7 @@ void myWiFiTask(void *pvParameters)
     {
       state = WiFi.status();
       if( state != WL_CONNECTED )
-      {  
+      {
         //if (state == WL_NO_SHIELD)
         if( firstConnectAttempt )
         {
@@ -3714,7 +3724,7 @@ void myWiFiTask(void *pvParameters)
           Serial.println( "No SSID available" );
         }
         else if( state == WL_CONNECTION_LOST )
-        {  
+        {
           Serial.println("WiFi connection lost");
           WiFi.disconnect(true);
           cntrAuthFailure++;
@@ -3747,15 +3757,16 @@ void myWiFiTask(void *pvParameters)
         vTaskDelay (250); // Check again in about 250ms
       } 
       else // We have connection
-      { 
+      {
         if( myWiFiFirstConnect ) // Report only once
-        {  
+        {
           myWiFiFirstConnect = false;
           cntrAuthFailure = 0;
           Serial.println( "Connected" );
           Serial.print( "IP address: " );
           Serial.println( WiFi.localIP() );
           Serial.println( WiFi.getHostname() );
+          needUpdateUI = true;
         }
         vTaskDelay (5000); // Check again in about 5s
       }
@@ -3797,7 +3808,11 @@ void updateUI( void )
   if (haveDisplay )
   {
     String ip;
-    if( WiFi.status() != WL_CONNECTED )
+    if (!Settings.wifiOn)
+      ip = "WiFi off";
+    else if (Settings.ssid.length() == 0)
+      ip = Settings.apname;
+    else if (WiFi.status() != WL_CONNECTED)
       ip = "Not Connected";
     else
       ip = WiFi.localIP().toString();
@@ -3848,8 +3863,14 @@ void setup()
   rotaryEncoder.init();
   lastButtonCnt = rotaryEncoder.getButtonPressCount();
   cursor_at     = 0;
-  #endif  
   
+  //----------------------------------------------------------------------------
+  //--- Is user pressing the rotary encoder switch during boot?
+  //----------------------------------------------------------------------------
+  if( !digitalRead( ROTARYENCODER_PINSW ) )
+    changeWifiState = true;  
+  #endif  
+    
   //----------------------------------------------------------------------------
   //--- Configure I2C
   //----------------------------------------------------------------------------
@@ -3966,10 +3987,17 @@ void setup()
   //----------------------------------------------------------------------------
   readSettings();
   changeChannelSummationADC();
+  if( changeWifiState )
+  {
+    Serial.print( F("Changing WiFi status......") );
+    Settings.wifiOn = Settings.wifiOn ? false : true;
+    writeSettings();
+    Serial.println( F("[OK]") );
+  }
 
-  Serial.print( "Init user parameter......" );
+  Serial.print( F("Init user parameter......") );
   initUserParams();
-  Serial.println( "[OK]" );
+  Serial.println( F("[OK]") );
   readPluginMeta();
 
   //----------------------------------------------------------------------------
@@ -4157,7 +4185,8 @@ void setup()
   //--- Configure ESP for WiFi access
   //----------------------------------------------------------------------------
   // Create a connection task with 8kB stack on core 0
-  xTaskCreatePinnedToCore(myWiFiTask, "myWiFiTask", 8192, NULL, 3, NULL, 0);
+  if( Settings.wifiOn )
+    xTaskCreatePinnedToCore(myWiFiTask, "myWiFiTask", 8192, NULL, 3, NULL, 0);
 
 
   //----------------------------------------------------------------------------
