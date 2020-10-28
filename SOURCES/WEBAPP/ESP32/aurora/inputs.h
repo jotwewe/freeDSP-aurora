@@ -1,0 +1,19 @@
+#define Input_Analog1 0x00000000
+#define Input_Analog2 0x00000001
+#define Input_Analog3 0x00000002
+#define Input_Analog4 0x00000003
+#define Input_Analog5 0x00000004
+#define Input_Analog6 0x00000005
+#define Input_Analog7 0x00000006
+#define Input_Analog8 0x00000007
+#define Input_USB1    0x00010000
+#define Input_USB2    0x00010001
+#define Input_USB3    0x00010002
+#define Input_USB4    0x00010003
+#define Input_USB5    0x00010004
+#define Input_USB6    0x00010005
+#define Input_USB7    0x00010006
+#define Input_USB8    0x00010007
+#define Input_SPDIFL  0x00040000
+#define Input_SPDIFR  0x00040001
+

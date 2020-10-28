@@ -1,3 +1,5 @@
+// -*- mode: c; mode: fold -*-
+
 #include <Wire.h>
 #include <WiFi.h>
 #include <ESPAsyncWebServer.h>
@@ -14,8 +16,14 @@
 #include "AudioFilterFactory.h"
 #include "fallback.h"
 #include "webota.h"
+#include "OLED128x64_SH1106.h"
+#include "inputs.h"
 
-#define VERSION_STR "v2.0.3"
+#if HAVE_ROTARYENCODER
+#include "rotaryencoder.h"
+#endif
+
+#define VERSION_STR "v2.0.3jw4"
 
 #define MAX_NUM_INPUTS 8
 #define MAX_NUM_HPS 8
@@ -196,6 +204,31 @@ String presetAddonCfgFile[MAX_NUM_PRESETS] = { "/addoncfg.001", "/addoncfg.002",
 
 AsyncWebServer server( 80 );
 
+//------------------------------------------------------------------------------
+//
+// Display Driver
+//
+//------------------------------------------------------------------------------
+OLED128x64_SH1106 myDisplay;
+bool haveDisplay = true;
+bool needUpdateUI = false;
+
+//------------------------------------------------------------------------------
+//
+// Rotary Encoder
+//
+//------------------------------------------------------------------------------
+#if HAVE_ROTARYENCODER
+#define CursorPositions 3
+uint8_t lastButtonCnt;
+uint8_t cursor_at;
+int     lastEncoder;
+#define Max_microSecsSinceUserinput 99123456
+int     microSecsSinceUserinput;
+int     microSecsLastLoop;
+bool    presetChangePending = false;
+uint8_t idxStereoInput = 0;
+#endif
 
 //==============================================================================
 /*! 
@@ -719,9 +752,9 @@ void uploadDspFirmware( void )
 
 
 //==============================================================================
-/*! Uploads the user parameters from ESP32 SPI flash to DSP.
+/*! Reads the user parameters from ESP32 SPI flash.
  */
-void uploadUserParams( void )
+void readUserParams( void )
 {
   String fileName = presetUsrparamFile[currentPreset];
  
@@ -734,7 +767,7 @@ void uploadUserParams( void )
 
     if( fileUserParams )
     {
-      Serial.print( "Uploading user parameters from " + fileName );
+      Serial.print( "Reading user parameters from " + fileName );
       uint32_t totalSize = 0;
       for( int ii = 0; ii < numInputs; ii++ )
       {
@@ -835,12 +868,17 @@ void uploadUserParams( void )
       Serial.println( "bytes" );
     }
     else
-      Serial.println( "[ERROR] uploadUserParams(): Reading preset file failed." );
+      Serial.println( "[ERROR] readUserParams(): Reading preset file failed." );
 
     fileUserParams.close();
-
   }
+}
 
+//==============================================================================
+/*! Uploads the user parameters to DSP.
+ */
+void uploadUserParams( void )
+{
   //--- Now upload the parameters
   Serial.print( "Uploading user parameters..."  );
   for( int ii = 0; ii < numInputs; ii++ )
@@ -890,8 +928,7 @@ void uploadUserParams( void )
   Serial.print( "." );
 
   setMasterVolume();
-  Serial.println( "[OK]" );
-  
+  Serial.println( "[OK]" );  
 }
 
 //==============================================================================
@@ -1101,10 +1138,11 @@ void resetDAC( bool rst )
 //==============================================================================
 /*! Mute DAC
  */
-void softMuteDAC( void )
+void softMuteDAC(uint16_t uDelayMillisecs = 500)
 {
   AK4458_REGWRITE( AK4458_CONTROL2, 0b00100011 );
-  delay(500);
+  if (uDelayMillisecs > 0)
+    delay(uDelayMillisecs);
 }
 
 //==============================================================================
@@ -1819,6 +1857,7 @@ void handlePostInputJson( AsyncWebServerRequest* request, uint8_t* data )
   request->send(200, "text/plain", "");  
 
   softUnmuteDAC();
+  needUpdateUI = true;
 }
 
 //==============================================================================
@@ -2855,9 +2894,10 @@ void handlePostMasterVolumeJson( AsyncWebServerRequest* request, uint8_t* data )
 
   masterVolume.val = root["vol"].as<String>().toFloat();
   
-  setMasterVolume(); 
+  setMasterVolume();
     
-  request->send(200, "text/plain", "");  
+  request->send(200, "text/plain", "");
+  needUpdateUI = true;
 }
 
 //==============================================================================
@@ -2913,12 +2953,14 @@ void handlePostPresetJson( AsyncWebServerRequest* request, uint8_t* data )
   currentPreset = root["pre"].as<uint8_t>();
 
   initUserParams();
+  readUserParams();
   uploadUserParams();
 
   updateAddOn();
      
   request->send(200, "text/plain", "");
-  softUnmuteDAC();  
+  softUnmuteDAC();
+  needUpdateUI = true;
 }
  
 //==============================================================================
@@ -3747,6 +3789,49 @@ void enableVolPot( void )
 }
 
 //==============================================================================
+/*! Updates the user interface on the display
+ *
+ */
+void updateUI( void )
+{
+  if (haveDisplay )
+  {
+    String ip;
+    if( WiFi.status() != WL_CONNECTED )
+      ip = "Not Connected";
+    else
+      ip = WiFi.localIP().toString();
+
+    uint8_t u8char;
+    if (presetChangePending)
+      u8char = 'a' + currentPreset;
+    else
+      u8char = 'A' + currentPreset;
+    String strPreset = String((const char)(u8char));
+    
+    String strInput;
+    switch (idxStereoInput)
+    {
+      case 1:
+        strInput = "Analog 1+2";
+        break;
+      case 2:
+        strInput = "Analog 3+4";
+        break;
+      case 3:
+        strInput = "Analog 5+6";
+        break;
+      default:
+        strInput = "USB 1+2";
+        break;
+    }
+    
+    myDisplay.drawUI(ip.c_str(), strPreset.c_str(), strInput.c_str(), masterVolume.val, cursor_at);
+  }
+}
+
+
+//==============================================================================
 /*! Arduino Setup
  *
  */
@@ -3755,13 +3840,45 @@ void setup()
   Serial.begin(115200);
   Serial.println( "AURORA Debug Log" );
   Serial.println( VERSION_STR );
-
+  
+  //----------------------------------------------------------------------------
+  //--- Init Rotary Encoder Handling
+  //----------------------------------------------------------------------------
+  #if HAVE_ROTARYENCODER
+  rotaryEncoder.init();
+  lastButtonCnt = rotaryEncoder.getButtonPressCount();
+  cursor_at     = 0;
+  #endif  
+  
   //----------------------------------------------------------------------------
   //--- Configure I2C
   //----------------------------------------------------------------------------
   Wire.begin( I2C_SDA_PIN, I2C_SCL_PIN );
   Wire.setClock( 100000 );
+  delay( 100 );
 
+  //----------------------------------------------------------------------------
+  //--- Scan for I2C display connected?
+  //----------------------------------------------------------------------------
+  Wire.beginTransmission( SH1106_I2C_ADDR );
+  uint8_t ec = Wire.endTransmission( true );
+  if( ec == 0 )
+  {
+    Serial.println( "Detected SH1106 display" );
+    haveDisplay = true;
+  }
+  else
+    haveDisplay = false;
+
+  //----------------------------------------------------------------------------
+  //--- Init Display (if present)
+  //----------------------------------------------------------------------------
+  if( haveDisplay )
+  {
+    myDisplay.begin();
+    myDisplay.drawBootScreen();
+  }  
+    
   // wait until everything is stable
   // might be a bit to defensive
   delay( 2000 );
@@ -3871,6 +3988,7 @@ void setup()
   //----------------------------------------------------------------------------
   //--- Upload user parameters to DSP
   //----------------------------------------------------------------------------
+  readUserParams();
   uploadUserParams();
 
   //----------------------------------------------------------------------------
@@ -4041,11 +4159,55 @@ void setup()
   // Create a connection task with 8kB stack on core 0
   xTaskCreatePinnedToCore(myWiFiTask, "myWiFiTask", 8192, NULL, 3, NULL, 0);
 
+
+  //----------------------------------------------------------------------------
+  //--- Enable Volume Potentiometer
+  //----------------------------------------------------------------------------
   enableVolPot();
 
   resetDAC( false );
 
+  microSecsSinceUserinput = 0;
+  microSecsLastLoop = micros();
+  updateUI();
+
   Serial.println( "Ready" );
+}
+
+void setStereoInput(uint8_t idx, bool bUpload)
+{
+  switch (idx)
+  {
+    case 1:
+      paramInputs[0].sel = Input_Analog1;
+      paramInputs[2].sel = Input_Analog2;
+      break;
+    case 2:
+      paramInputs[0].sel = Input_Analog3;
+      paramInputs[2].sel = Input_Analog4;
+      break;
+    case 3:
+      paramInputs[0].sel = Input_Analog5;
+      paramInputs[2].sel = Input_Analog6;
+      break;
+    default:
+      paramInputs[0].sel = Input_USB1;
+      paramInputs[2].sel = Input_USB2;
+      break;                  
+  }
+  paramInputs[1].sel = paramInputs[0].sel;
+  paramInputs[3].sel = paramInputs[2].sel;
+  for (uint8_t n=0; n<4; n++)
+  {
+    paramInputs[n+4].sel = paramInputs[n].sel;
+  }
+  if (bUpload)
+  {
+    for (uint8_t n=0; n<MAX_NUM_INPUTS; n++)
+    {
+      setInput(n);
+    }
+  }
 }
 
 //==============================================================================
@@ -4057,4 +4219,131 @@ void loop()
   TIMERG0.wdt_wprotect=TIMG_WDT_WKEY_VALUE;
   TIMERG0.wdt_feed=1;
   TIMERG0.wdt_wprotect=0;
+      
+#if HAVE_ROTARYENCODER
+  {
+    int m = micros();
+    int microSecsSinceLastLoop = m - microSecsLastLoop;
+    //
+    microSecsSinceUserinput += microSecsSinceLastLoop;
+    if (microSecsSinceUserinput < 0)
+      microSecsSinceUserinput = Max_microSecsSinceUserinput;
+    //
+    microSecsLastLoop = m;
+  }
+  
+  rotaryEncoder.poll();
+  uint8_t bc  = rotaryEncoder.getButtonPressCount();
+  int     rot = rotaryEncoder.getRotationValue() & ~3;
+  if (lastButtonCnt != bc)
+  {
+    microSecsSinceUserinput = 0;
+    cursor_at += bc - lastButtonCnt;
+    while (cursor_at >= CursorPositions)
+      cursor_at -= CursorPositions;      
+    lastButtonCnt = bc;
+    lastEncoder   = rot;
+    needUpdateUI  = true;
+  }
+  
+  int encoderDiff = (rot - lastEncoder) >> 2;
+  if (encoderDiff != 0)
+  {
+    microSecsSinceUserinput = 0;
+    switch (cursor_at)
+    {
+      case 0:
+        idxStereoInput += encoderDiff;
+        while (idxStereoInput > 128)
+          idxStereoInput += 4;
+        while (idxStereoInput >= 4)
+          idxStereoInput -= 4;
+        //
+        softMuteDAC(0);
+        updateUI();
+        setStereoInput(idxStereoInput, true);
+        softUnmuteDAC();          
+        break;
+
+      case 1:
+        if (false)
+        {
+          // Use every increment given by the encoder, but change preset after some seconds
+          // of inactivity.
+          currentPreset += encoderDiff;
+          while (currentPreset >= 128) // currentPreset is unsigned
+            currentPreset += MAX_NUM_PRESETS;
+          while (currentPreset >= MAX_NUM_PRESETS)
+            currentPreset -= MAX_NUM_PRESETS;
+          //
+          needUpdateUI = true;
+          presetChangePending = true;
+        }
+        else
+        {
+          // Change preset at once, but limit to one step in either direction.
+          if (encoderDiff > 0)
+          {
+            if (++currentPreset >= MAX_NUM_PRESETS)
+              currentPreset = 0;
+          }
+          else
+          {
+            if (--currentPreset >= 128) // currentPreset is unsigned
+              currentPreset = MAX_NUM_PRESETS - 1;
+          }
+          //
+          softMuteDAC(0);
+          initUserParams();
+          readUserParams();
+          setStereoInput(idxStereoInput, false); // Preset must not change input
+          updateUI();
+          uploadUserParams();
+          updateAddOn();
+          softUnmuteDAC();
+          //
+          rot = rotaryEncoder.getRotationValue() & ~3;
+        }
+        break;
+    
+      case 2:
+        masterVolume.val += encoderDiff;
+        if (masterVolume.val > 0)
+          masterVolume.val = 0;
+        else if (masterVolume.val < -120)
+          masterVolume.val = -120;
+        setMasterVolume();
+        needUpdateUI = true;
+        break;
+    }
+    //    
+    lastEncoder = rot;
+  }
+
+  if (presetChangePending && microSecsSinceUserinput > 2123456)
+  {
+    presetChangePending = false;
+    //
+    softMuteDAC(0);
+    initUserParams();
+    readUserParams();
+    setStereoInput(idxStereoInput, false); // Preset must not change input
+    uploadUserParams();
+    updateAddOn();
+    softUnmuteDAC();
+    needUpdateUI = true;
+  }    
+#endif
+  
+  if( needUpdateUI )
+  {
+    updateUI();
+    needUpdateUI = false;
+  }
+  else if (microSecsSinceUserinput > 10123456 && microSecsSinceUserinput < Max_microSecsSinceUserinput)
+  {
+    myDisplay.clearBuffer();
+    myDisplay.sendBuffer();    
+    microSecsSinceUserinput = Max_microSecsSinceUserinput;
+  }  
 }
