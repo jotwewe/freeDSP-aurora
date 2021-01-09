@@ -32,12 +32,13 @@ The code contains two modes of changing presets (see if (false) in line 4303):
      lowercase letter until it becomes active.
      
 "8channels_ExpI2S" differs from "8channels" regarding settings of
-SDATA_IN3:
+SDATA_IN3 (Hardware Configuration/ADAU145x Register
+Controls/SERIAL_PORTS/SDATA_IN3):
 
  - "MSB Position": "I2S - BCLK delay by 1"
  - "TDM Mode": "2 channels, 32bit"
  - "LRCLK type": "50/50 duty cycle clock"
- - "LRCLK Polarity": "Positive polarity"
+ - "LRCLK Polarity": "Negative polarity"
  - "BCLK Polarity": "Positive polarity"
  
 Connections:
