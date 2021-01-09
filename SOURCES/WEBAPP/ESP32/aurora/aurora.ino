@@ -23,7 +23,7 @@
 #include "rotaryencoder.h"
 #endif
 
-#define VERSION_STR "v2.0.3jw4"
+#define VERSION_STR "v2.0.3jw5"
 
 #define MAX_NUM_INPUTS 8
 #define MAX_NUM_HPS 8
@@ -65,15 +65,6 @@ struct tSettings
 tSettings Settings;
 
 typedef uint8_t tFilterType;
-
-enum
-{
-  ADDR_ANALOG,
-  ADDR_UAC,
-  ADDR_EXP,
-  ADDR_ESP,
-  ADDR_SPDIF
-};
 
 struct tInput
 {
@@ -231,7 +222,8 @@ int     lastEncoder;
 int     microSecsSinceUserinput;
 int     microSecsLastLoop;
 bool    presetChangePending = false;
-uint8_t idxStereoInput = 0;
+uint8_t idxStereoInput = 4;
+const uint8_t numStereoInputs = 5;
 #endif
 
 //==============================================================================
@@ -399,7 +391,6 @@ void initUserParams( void )
   }
 
   masterVolume.val = -60.0;
-
 }
 
 //==============================================================================
@@ -562,11 +553,11 @@ void readPluginMeta( void )
 
     for( int ii = 0; ii < numInputs; ii++ )
     {
-      paramInputs[ii].addrChn[ADDR_ANALOG] = static_cast<uint16_t>(jsonPluginMeta["analog"][ii].as<String>().toInt());
-      paramInputs[ii].addrChn[ADDR_UAC] = static_cast<uint16_t>(jsonPluginMeta["uac"][ii].as<String>().toInt());
-      paramInputs[ii].addrChn[ADDR_EXP] = static_cast<uint16_t>(jsonPluginMeta["exp"][ii].as<String>().toInt());
-      //paramInputs[ii].addrChn[ADDR_ESP] = static_cast<uint16_t>(jsonPluginMeta["esp"][ii].as<String>().toInt());
-      paramInputs[ii].addrChn[ADDR_SPDIF] = static_cast<uint16_t>(jsonPluginMeta["spdif"][ii].as<String>().toInt());
+      paramInputs[ii].addrChn[Input_Analog] = static_cast<uint16_t>(jsonPluginMeta["analog"][ii].as<String>().toInt());
+      paramInputs[ii].addrChn[Input_USB] = static_cast<uint16_t>(jsonPluginMeta["uac"][ii].as<String>().toInt());
+      //paramInputs[ii].addrChn[Input_ESP] = static_cast<uint16_t>(jsonPluginMeta["esp"][ii].as<String>().toInt());
+      paramInputs[ii].addrChn[Input_Exp] = static_cast<uint16_t>(jsonPluginMeta["exp"][ii].as<String>().toInt());
+      paramInputs[ii].addrChn[Input_SPDIF] = static_cast<uint16_t>(jsonPluginMeta["spdif"][ii].as<String>().toInt());
       paramInputs[ii].addrPort = static_cast<uint16_t>(jsonPluginMeta["port"][ii].as<String>().toInt());
     }
 
@@ -775,9 +766,12 @@ void readUserParams( void )
     {
       Serial.print( "Reading user parameters from " + fileName );
       uint32_t totalSize = 0;
+      tInput tmpInput;
       for( int ii = 0; ii < numInputs; ii++ )
       {
-        size_t len = fileUserParams.read( (uint8_t*)&(paramInputs[ii]), sizeof(tInput) );
+        // Read selection, do not overwrite plugin metadata!        
+        size_t len = fileUserParams.read( (uint8_t*)&(tmpInput), sizeof(tInput) );
+        paramInputs[ii].sel = tmpInput.sel;
         if( len != sizeof(tInput) )
           Serial.println( "[ERROR] Reading inputs from " + presetUsrparamFile[currentPreset] );
         totalSize += len;
@@ -1872,24 +1866,26 @@ void handlePostInputJson( AsyncWebServerRequest* request, uint8_t* data )
  */
 void setInput( const int idx )
 {
-  uint32_t sel = (paramInputs[idx].sel >> 16) & 0x0000ffff;
-  uint16_t addrChn = paramInputs[idx].addrChn[sel];
+  // Setting of InputSelect_<Channel1To8>.Nx1-1: Input_Analog, Input_USB, ..., Input_SPDIF
+  uint32_t selPort = (paramInputs[idx].sel >> 16) & 0x0000ffff;
+  
+  uint16_t addrChn = paramInputs[idx].addrChn[selPort];
+  
+  // Address of of InputSelect_<Channel1To8>.Nx1-1
   uint16_t addrPort = paramInputs[idx].addrPort;
-  sel = paramInputs[idx].sel;
   
   byte val[4];
-  uint32_t intval = sel & 0x0000ffff;
+  uint32_t intval = paramInputs[idx].sel & 0x0000ffff;
   val[0] = (intval >> 24 ) & 0xFF;
   val[1] = (intval >> 16 ) & 0xFF;
   val[2] = (intval >> 8 ) & 0xFF;
   val[3] =  intval & 0xFF;
   ADAU1452_WRITE_BLOCK( addrChn, val, 4 );
 
-  intval = (sel >> 16) & 0x0000ffff;
-  val[0] = (intval >> 24 ) & 0xFF;
-  val[1] = (intval >> 16 ) & 0xFF;
-  val[2] = (intval >> 8 ) & 0xFF;
-  val[3] =  intval & 0xFF;
+  val[0] = (selPort >> 24 ) & 0xFF;
+  val[1] = (selPort >> 16 ) & 0xFF;
+  val[2] = (selPort >> 8 ) & 0xFF;
+  val[3] =  selPort & 0xFF;
   ADAU1452_WRITE_BLOCK( addrPort, val, 4 );
 }
 
@@ -3836,9 +3832,11 @@ void updateUI( void )
       case 3:
         strInput = "Analog 5+6";
         break;
-      default:
-        strInput = "USB 1+2";
+      case 4:
+        strInput = "Exp 1+2";
         break;
+      default:
+        strInput = "USB 1+2";                
     }
     
     myDisplay.drawUI(ip.c_str(), strPreset.c_str(), strInput.c_str(), masterVolume.val, cursor_at);
@@ -4198,6 +4196,7 @@ void setup()
 
   microSecsSinceUserinput = 0;
   microSecsLastLoop = micros();
+  setStereoInput(idxStereoInput, true);
   updateUI();
 
   Serial.println( "Ready" );
@@ -4208,20 +4207,24 @@ void setStereoInput(uint8_t idx, bool bUpload)
   switch (idx)
   {
     case 1:
-      paramInputs[0].sel = Input_Analog1;
-      paramInputs[2].sel = Input_Analog2;
+      paramInputs[0].sel = (Input_Analog<<16) | 1;
+      paramInputs[2].sel = (Input_Analog<<16) | 0;
       break;
     case 2:
-      paramInputs[0].sel = Input_Analog3;
-      paramInputs[2].sel = Input_Analog4;
+      paramInputs[0].sel = (Input_Analog<<16) | 3;
+      paramInputs[2].sel = (Input_Analog<<16) | 2;
       break;
     case 3:
-      paramInputs[0].sel = Input_Analog5;
-      paramInputs[2].sel = Input_Analog6;
+      paramInputs[0].sel = (Input_Analog<<16) | 5;
+      paramInputs[2].sel = (Input_Analog<<16) | 4;
+      break;
+    case 4:
+      paramInputs[0].sel = (Input_Exp<<16) | 1;
+      paramInputs[2].sel = (Input_Exp<<16) | 0;
       break;
     default:
-      paramInputs[0].sel = Input_USB1;
-      paramInputs[2].sel = Input_USB2;
+      paramInputs[0].sel = (Input_USB<<16) | 1;
+      paramInputs[2].sel = (Input_USB<<16) | 0;
       break;                  
   }
   paramInputs[1].sel = paramInputs[0].sel;
@@ -4229,7 +4232,7 @@ void setStereoInput(uint8_t idx, bool bUpload)
   for (uint8_t n=0; n<4; n++)
   {
     paramInputs[n+4].sel = paramInputs[n].sel;
-  }
+  }  
   if (bUpload)
   {
     for (uint8_t n=0; n<MAX_NUM_INPUTS; n++)
@@ -4284,9 +4287,9 @@ void loop()
       case 0:
         idxStereoInput += encoderDiff;
         while (idxStereoInput > 128)
-          idxStereoInput += 4;
-        while (idxStereoInput >= 4)
-          idxStereoInput -= 4;
+          idxStereoInput += numStereoInputs;
+        while (idxStereoInput >= numStereoInputs)
+          idxStereoInput -= numStereoInputs;
         //
         softMuteDAC(0);
         updateUI();
@@ -4322,9 +4325,11 @@ void loop()
               currentPreset = MAX_NUM_PRESETS - 1;
           }
           //
+          float mastervolume_before_preset_change = masterVolume.val;
           softMuteDAC(0);
           initUserParams();
           readUserParams();
+          masterVolume.val = mastervolume_before_preset_change;
           setStereoInput(idxStereoInput, false); // Preset must not change input
           updateUI();
           uploadUserParams();
@@ -4353,10 +4358,12 @@ void loop()
   {
     presetChangePending = false;
     //
+    float mastervolume_before_preset_change = masterVolume.val;
     softMuteDAC(0);
     initUserParams();
     readUserParams();
     setStereoInput(idxStereoInput, false); // Preset must not change input
+    masterVolume.val = mastervolume_before_preset_change;
     uploadUserParams();
     updateAddOn();
     softUnmuteDAC();
